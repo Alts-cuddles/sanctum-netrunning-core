@@ -98,6 +98,9 @@ function drawOutline(tokenId, times, stay) {
   game._netarchPulseDead[tokenId] = false;
   const holder = new PIXI.Container();
   holder._netarchTokenId = tokenId;
+  holder.eventMode = "none";
+  holder.interactive = false;
+  holder.interactiveChildren = false;
   layer.addChild(holder);
   const ring = new PIXI.Graphics();
   const texture = token.texture || token.mesh?.texture;
@@ -113,7 +116,8 @@ function drawOutline(tokenId, times, stay) {
   holder.addChild(sprite);
   holder.addChild(label);
   let n = 0;
-  const flashes = stay ? 0 : times;
+  const flashes = stay ? 0 : Math.max(1, Number(times) || 12);
+  const endsAt = stay ? 0 : Date.now() + flashes * 1000;
   game._netarchPulseTimers[tokenId] = setInterval(() => {
     if (game._netarchPulseDead[tokenId]) { stopOutline(tokenId); return; }
     const live = canvas.tokens?.get(tokenId);
@@ -138,8 +142,8 @@ function drawOutline(tokenId, times, stay) {
     }
     label.y = ry + 4;
     label.text = live.name || live.document?.name || "";
-    if (!stay && n >= flashes * 2) stopOutline(tokenId);
-  }, 140);
+    if (!stay && Date.now() >= endsAt) stopOutline(tokenId);
+  }, 120);
 }
 function emitPulse(tokenId, times, stay, userId) {
   game.socket.emit(SOCKET_EVENT, { type: "netarch-pulse", data: { tokenId, times, stay, userId } });

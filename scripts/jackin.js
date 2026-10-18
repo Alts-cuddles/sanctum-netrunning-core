@@ -8,7 +8,7 @@ const SETTING_KEY = "cyberpunk-netarchs";
 const POSITION_KEY = "cyberpunk-netarch-positions";
 const ACCESS_FLAG = "netarchAccess";
 const SOCKET_EVENT = "system.cyberpunk-red-core";
-const MODULE_SOCKET = "module.sanctum-netrunning-core";
+const MODULE_SOCKET = "module.sanctum-netrunning";
 function emitBoth(type, data) {
   game.socket.emit(SOCKET_EVENT, { type, data });
   game.socket.emit(MODULE_SOCKET, { type, data });
@@ -166,7 +166,7 @@ function chooseAccess() {
   }).render(true);
   new Dialog({
     title: "Jack in",
-    content: "<p>Physical keeps Ex-Disk. Virtual does not.</p>",
+    content: "<p>Physical keeps Ex-Disk and Elysia. Virtual does not.</p>",
     buttons: {
       physical: { label: "Physical", callback: () => askMode("physical") },
       virtual: { label: "Virtual", callback: () => askMode("virtual") }
