@@ -32,6 +32,18 @@ if (!game.user || !game.user.isGM) {
 }
 ```
 
+## Players: open the GM's current architecture
+
+The GM opens a map first. Players then run this script macro. If no map is open, it opens the architecture of an access-point token the player has targeted.
+
+```javascript
+if (game.netarch && typeof game.netarch.openCurrent === "function") {
+  await game.netarch.openCurrent();
+} else {
+  ui.notifications.warn("Mapper did not boot. Reload and try again.");
+}
+```
+
 ## What it does
 
 **Mapper**

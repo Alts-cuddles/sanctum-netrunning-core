@@ -2,7 +2,7 @@
   "id": "sanctum-netrunning-core",
   "title": "Sanctum Netrunning Core",
   "description": "Netarch mapper, scanner access points, and sheet jack-in for Cyberpunk RED. Core rules only. No Elysia bonus. Scanner range is the roll total.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "compatibility": {
     "minimum": "12",
     "verified": "12"

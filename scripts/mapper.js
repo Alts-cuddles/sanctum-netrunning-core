@@ -10,8 +10,9 @@ const AVATAR_KEY = "cyberpunk-netarch-avatars";
 const SOCKET_EVENT = "system.cyberpunk-red-core";
 const MODULE_SOCKET = "module.sanctum-netrunning-core";
 function emitBoth(type, data) {
-  game.socket.emit(SOCKET_EVENT, { type, data });
-  game.socket.emit(MODULE_SOCKET, { type, data });
+  const payload = { type, data, messageId: foundry.utils.randomID() };
+  game.socket.emit(SOCKET_EVENT, payload);
+  game.socket.emit(MODULE_SOCKET, payload);
 }
 const NETARCH_BG = "systems/cyberpunk-red-core/tiles/netarch/S0L-BlankNetMap-VTT.webm";
 const TILE_VIDEOS = {
@@ -141,7 +142,8 @@ function iceInstance(name) {
     per: src.per || 0, spd: src.spd || 0, cost: src.cost || 0,
     kind: src.kind, cls: src.cls || "Demon", packId: src.packId || "",
     dmgStd: src.dmgStd || "", dmgIce: src.dmgIce || "", effect: src.effect || "",
-    img: src.img || "", uid: randomId()
+    img: src.img || "", uid: randomId(),
+    sourceUuid: src.uuid || src.actorUuid || null
   };
 }
 function stripHtml(html) { return String(html || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(); }
@@ -351,6 +353,42 @@ function iceUid(ice, node, index) {
   ice.uid = (node?.id || "ice") + "-" + index + "-" + Math.random().toString(36).slice(2, 8);
   return ice.uid;
 }
+function recordIceHomes(arch) {
+  for (const node of arch.nodes || []) {
+    (node.blackIce || []).forEach((ice, index) => {
+      iceUid(ice, node, index);
+      if (!ice.homeNodeId) {
+        ice.homeNodeId = node.id;
+        ice.homeIndex = index;
+      }
+    });
+  }
+}
+
+function resetLivingIceLocations(arch) {
+  const nodes = new Map((arch.nodes || []).map(n => [n.id, n]));
+  const moves = [];
+  for (const node of arch.nodes || []) {
+    for (const ice of node.blackIce || []) {
+      if (ice.destroyed || ice.derezzed || Number(ice.hp) <= 0) continue;
+      const home = nodes.get(ice.homeNodeId);
+      if (home && home !== node) moves.push({ node, home, ice });
+    }
+  }
+  for (const { node, home, ice } of moves) {
+    node.blackIce = node.blackIce.filter(entry => entry.uid !== ice.uid);
+    home.blackIce ||= [];
+    home.blackIce.push(ice);
+  }
+  for (const node of arch.nodes || []) {
+    node.blackIce?.sort((a, b) =>
+      (a.homeIndex ?? Number.MAX_SAFE_INTEGER) -
+      (b.homeIndex ?? Number.MAX_SAFE_INTEGER));
+  }
+  return moves.length;
+}
+
+
 function tokenForIceUid(uid) {
   if (!uid) return null;
   return (canvas.tokens?.placeables || []).find(t => t.document?.getFlag?.("world", "netarchIceUid") === uid) || null;
@@ -574,7 +612,10 @@ async function rollIceProgramStat(ice, stat) {
     if (keep === false) return { cancelled: true };
   }
   if (typeof cprRoll.roll === "function") await cprRoll.roll();
-  cprRoll.entityData = { actor: actor.id, item: item.id, token: actor.token?.id || canvas.tokens?.controlled?.[0]?.id || null };
+  cprRoll.entityData = {
+    ...(cprRoll.entityData || {}),
+    ...damageCardEntityData(actor, item)
+  };
   const posted = await renderCprRollCard(cprRoll);
   if (posted) return cprRoll;
   const render = foundry?.applications?.handlebars?.renderTemplate || globalThis.renderTemplate;
@@ -582,6 +623,22 @@ async function rollIceProgramStat(ice, stat) {
   await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor }), content: html });
   return cprRoll;
 }
+
+function damageCardEntityData(actor, item) {
+  const sourceToken = actor.token?.object ||
+    canvas.tokens?.placeables?.find(t => t.actor === actor);
+  const targets = [...(game.user.targets || [])]
+    .filter(t => t.actor)
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  return {
+    actor: actor.id,
+    item: item.id,
+    token: sourceToken?.id || null,
+    tokens: targets
+  };
+}
+
 async function rollIceProgramDamage(ice) {
   const item = findIceProgram(ice?.name || ice);
   if (!item) {
@@ -618,6 +675,10 @@ async function rollIceProgramDamage(ice) {
   }
   if (typeof cprRoll.roll === "function") await cprRoll.roll();
   rememberDamage(cprRoll.total || cprRoll.roll?._total, item.name);
+  cprRoll.entityData = {
+    ...(cprRoll.entityData || {}),
+    ...damageCardEntityData(actor, item)
+  };
   const posted = await renderCprRollCard(cprRoll);
   if (!posted) {
     const render = foundry?.applications?.handlebars?.renderTemplate || globalThis.renderTemplate;
@@ -808,6 +869,7 @@ function generateNetarch(difficulty, forcedFloors = 0) {
   });
   keepIceOffRestricted(arch);
   if (rolledDemon && arch.nodes.length >= 6 && rollDie(10) >= 7) placeDemonFloor(arch, rolledDemon);
+  recordIceHomes(arch);
   arch.budget = computeBudget(arch);
   return arch;
 }
@@ -868,6 +930,7 @@ function placeDemonFloor(arch, demonName) {
   if (host) arch.connections.push({ id: randomId(), from: host.id, to: node.id });
   return node;
 }
+
 function applyGenerateChoices(arch, choices) {
   choices = choices || {};
   ensureRoot(arch);
@@ -958,9 +1021,30 @@ async function ensureSettings() {
   if (!game.settings.settings.get(`world.${POSITION_KEY}`)) {
     game.settings.register("world", POSITION_KEY, { name: "Cyberpunk Netarch Positions", scope: "world", config: false, type: Object, default: {} });
   }
+  if (!game.settings.settings.get(`world.${OPEN_KEY}`)) {
+    game.settings.register("world", OPEN_KEY, { name: "Cyberpunk Netarch Open", scope: "world", config: false, type: String, default: "", onChange: value => { game._netarchOpenId = value || ""; } });
+  }
   if (!game.settings.settings.get(`world.${AVATAR_KEY}`)) {
     game.settings.register("world", AVATAR_KEY, { name: "Cyberpunk Netarch Avatars", scope: "world", config: false, type: Object, default: {} });
   }
+}
+
+function currentOpenArchId() {
+  let id = game._netarchOpenId || "";
+  if (!id) { try { id = game.settings.get("world", OPEN_KEY) || ""; } catch {} }
+  return id;
+}
+function publishOpenArch(id) {
+  if (!game.user?.isGM || !id) return;
+  const changed = game._netarchOpenId !== id;
+  game._netarchOpenId = id;
+  let stored = "";
+  try { stored = game.settings.get("world", OPEN_KEY) || ""; } catch {}
+  if (stored !== id) {
+    try { Promise.resolve(game.settings.set("world", OPEN_KEY, id)).catch(err => console.warn("Sanctum Netrunning Core | open arch setting", err)); }
+    catch (err) { console.warn("Sanctum Netrunning Core | open arch setting", err); }
+  }
+  if (changed) emitNetarch("netarch-open", id);
 }
 function loadNetarchs() {
   if (!game.bfNetarchs) {
@@ -1117,7 +1201,19 @@ async function handAdministrator(archId, userId) {
   ui.notifications.info(arch.name + " administrator is now " + (userId ? game.users.get(userId)?.name : "no one") + ". " + uuids.length + " token(s).");
   refreshOpenMapper({ full: true });
 }
-function actorPresenceKey(netarchId, actorId) { return netarchId + "::actor::" + actorId; }
+
+async function removeRunnerSeat(key) {
+  if (!key) return;
+  const positions = foundry.utils.deepClone(loadPositions());
+  if (!positions[key]) return;
+  delete positions[key];
+  await savePositions(positions);
+}
+function actorPresenceKey(netarchId, idOrUuid) {
+  const id = String(idOrUuid || "");
+  // Token UUID seats are unique even when actors share a name
+  return netarchId + "::actor::" + id;
+}
 function listRunners(netarchId) {
   const out = [];
   const all = loadPositions();
@@ -1628,8 +1724,7 @@ class NetarchApp extends Application {
     const netarch = loadNetarchs()[this._netarchId];
     if (!netarch) return this._buildListView();
     if (isGM() && this._netarchId) {
-      try { game.settings.set("world", OPEN_KEY, this._netarchId); } catch {}
-      emitNetarch("netarch-open", this._netarchId);
+      publishOpenArch(this._netarchId);
     }
     const canEdit = isGM() || netarch.createdBy === game.user.id;
     const bud = computeBudget(netarch);
@@ -1667,7 +1762,7 @@ class NetarchApp extends Application {
         </div>
         ${isGM() ? `<span class="na-badge" style="background:#321;color:#ffb070;">${formatEb(bud.total)}</span>` : ""}
         ${isGM() ? `<span class="na-badge" style="background:#123;color:#9be7f5;">${bud.floors} floors</span>` : ""}
-        ${isGM() ? `<button class="na-btn" id="na-rename">Rename</button>` : ""}
+        ${isGM() ? `<button class="na-btn" id="na-rename">Rename</button><button class="na-btn" id="na-rename-floor">Rename floor</button>` : ""}
         ${jacked ? `<span class="na-badge" style="background:#132;color:#7dff8a;">Jacked in</span>` : `<span class="na-badge" style="background:#311;color:#ff8aa0;">Not jacked in</span>`}
         ${netarch.entryNodeId ? `<button class="na-btn green na-connect-arch" data-id="${netarch.id}">Jack in</button>` : ""}
         ${jacked ? `<button class="na-btn red na-disconnect-arch" data-id="${netarch.id}">Jack out</button>` : ""}
@@ -1776,9 +1871,9 @@ class NetarchApp extends Application {
     pushUser(game.user);
     for (const u of game.users.contents.filter(u => u.active)) pushUser(u);
     for (const seat of listRunners(netarch.id).filter(s => s.key.includes("::actor::"))) {
-      const actor = game.actors.get(seat.actorId);
-      if (!actor || seen.has(actor.id)) continue;
-      seen.add(actor.id);
+      const actor = seat.data?.tokenUuid ? (fromUuidSync(seat.data.tokenUuid)?.actor || game.actors.get(seat.actorId)) : game.actors.get(seat.actorId);
+      if (!actor || seen.has(seat.key)) continue;
+      seen.add(seat.key);
       const node = netarch.nodes.find(n => n.id === seat.data.currentNodeId);
       const path = netAvatarPath(actor);
       const img = path
@@ -1789,13 +1884,13 @@ class NetarchApp extends Application {
         <div>
           <div style="color:#fff;">${actor.name}</div>
           <div style="color:#555;">${node ? (node.name || node.type) : "added"}</div>
-          ${isGM() ? `<button class="na-btn red na-remove-actor" data-actor="${actor.id}">Remove</button>` : ""}
+          ${isGM() ? `<button class="na-btn red na-remove-runner" data-seat="${seat.key}">Remove Runner</button>` : ""}
         </div>
       </div>`);
     }
     return `<div style="font-size:11px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid rgba(66,211,234,0.2);">
       <div style="color:#42d3ea;font-weight:bold;margin-bottom:4px;">Active Netrunners</div>
-      ${isGM() ? `<button class="na-btn" id="na-add-actor" style="width:100%;margin-bottom:6px;">Add actor</button>` : ""}
+      ${isGM() ? `<button class="na-btn" id="na-add-actor" style="width:100%;margin-bottom:6px;">Add Runner</button>` : ""}
       <div style="color:#555;font-size:10px;margin-bottom:6px;">NET avatar is stored in the mapper world setting, keyed to the actor id. The actor document and battle-map token are not updated.</div>
       ${rows.join("") || '<div style="color:#555;">None connected.</div>'}
     </div>`;
@@ -1899,7 +1994,7 @@ class NetarchApp extends Application {
       ${progRows}` : "";
     const iceBlock = `<div style="color:#ff8aa0;font-weight:700;margin:0 0 4px;">Floor ICE ${node ? `(${node.name || node.type})` : ""}</div>
       <div style="color:#555;font-size:10px;margin-bottom:4px;">Architecture ICE does not need Rez. Re Rez only restores HP.</div>
-      ${gm ? `<button class="na-btn green" id="na-rerez-all" style="margin-bottom:6px;">Re Rez all ICE</button>` : ""}
+      ${gm ? `<button class="na-btn green" id="na-rerez-all" style="margin-bottom:6px;">Re Rez all ICE</button><button class="na-btn" id="na-reset-ice" style="margin-bottom:6px;margin-left:4px;">Reset ICE locations</button>` : ""}
       ${iceRows}`;
     const runnerBlock = playerBlock || `<div style="color:#7aa;font-size:12px;">Select a runner token to see their programs.</div>`;
     return `<div style="font-size:11px;">
@@ -3127,29 +3222,88 @@ class NetarchApp extends Application {
     if (official?.cancelled && ability !== "Scanner") this._actionsUsed = Math.max(0, (this._actionsUsed || 1) - 1);
     this._refreshLive();
   }
+  async _rollNetFightStat(interfaceAbility) {
+    const actor = this._combatActor();
+    if (!actor) {
+      ui.notifications.warn("Select a combat-panel runner first.");
+      return;
+    }
+    try {
+      const result = await callSheetNetRoll(actor, { interfaceAbility });
+      if (!result) {
+        ui.notifications.warn("This roll requires the actor's Net Fight sheet.");
+      }
+    } catch (error) {
+      console.error("Sanctum Netrunning | Net Fight roll", error);
+      ui.notifications.error("Net Fight roll failed; see the console.");
+    } finally {
+      this._refreshLive();
+    }
+  }
+
   async _rollSpeed() {
-    const actor = this._combatActor();
-    if (!actor) return;
-    const before = this._actionsFor(actor);
-    const sheet = readNetSheet(actor);
-    const bonus = Number(sheet?.speedBonus || 0);
-    const rank = Number(sheet?.interfaceRank || 0);
-    const roll = await new Roll(`1d10 + ${rank} + ${bonus}`).evaluate();
-    await roll.toMessage({
-      speaker: ChatMessage.getSpeaker({ actor }),
-      flavor: `<b>${actor.name}</b> Speed check (free, no NET Action)`
-    });
-    this._actionsByActor = this._actionsByActor || {};
-    if (actor.id) this._actionsByActor[actor.id] = before;
-    this._refreshLive();
+    return this._rollNetFightStat("speed");
   }
+
   async _rollDefense() {
-    const actor = this._combatActor();
-    if (!actor) return;
-    const official = await callSheetNetRoll(actor, { interfaceAbility: "defense" });
-    if (!official) ui.notifications.warn("Defense must roll from the character sheet.");
-    this._refreshLive();
+    return this._rollNetFightStat("defense");
   }
+  
+  async _resetIceLocations() {
+    if (!game.user.isGM) return;
+    const all = foundry.utils.deepClone(loadNetarchs());
+    const arch = all[this._netarchId];
+    if (!arch) return;
+    const confirmed = await Dialog.confirm({
+      title: "Reset ICE locations",
+      content: "<p>Move surviving ICE to their recorded home floors? " +
+        "This does not restore REZ or recreate destroyed ICE.</p>"
+    });
+    if (!confirmed) return;
+    const count = resetLivingIceLocations(arch);
+    await saveNetarchs(all);
+    this._iceTokenCache?.clear();
+    this._refreshLive();
+    ui.notifications.info(`Returned ${count} ICE to their home floors.`);
+  }
+
+
+  async _renameFloor(nodeId = this._selectedNode) {
+    if (!game.user.isGM) return;
+    const node = loadNetarchs()[this._netarchId]?.nodes?.find(n => n.id === nodeId);
+    if (!node) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = "floor-name";
+    input.value = node.name || node.type;
+    input.maxLength = 120;
+    const box = document.createElement("div");
+    box.append(input);
+    new Dialog({
+      title: "Rename floor",
+      content: box.innerHTML,
+      render: html => html.find('[name="floor-name"]').val(input.value),
+      buttons: {
+        save: { label: "Save", callback: async html => {
+          if (!game.user.isGM) return;
+          const name = String(html.find('[name="floor-name"]').val() || "").trim();
+          if (!name) return ui.notifications.warn("Enter a floor name.");
+          const all = foundry.utils.deepClone(loadNetarchs());
+          const live = all[this._netarchId]?.nodes?.find(n => n.id === nodeId);
+          if (!live) return;
+          live.name = name.slice(0, 120);
+          live.customName = true;
+          await saveNetarchs(all);
+          this._refreshLive();
+        }},
+        cancel: { label: "Cancel" }
+      },
+      default: "save"
+    }).render(true);
+  }
+
+
+
   async _toggleRez(pid) {
     const actor = this._combatActor();
     const item = actor?.items.get(pid);
@@ -3342,6 +3496,16 @@ class NetarchApp extends Application {
   }
   _bindSideBody(root) {
     let dragId = null;
+    root.querySelectorAll(".na-pass-lock").forEach(btn => btn.addEventListener("click", async () => {
+      const all = loadNetarchs();
+      const node = all[this._netarchId]?.nodes?.find(n => n.id === (btn.dataset.node || this._selectedNode));
+      if (!node) return;
+      node.unlocked = node.unlocked !== true;
+      await saveNetarchs(all);
+      ui.notifications.info((node.name || "Password") + (node.unlocked ? " unlocked." : " locked."));
+      this._drawMap?.();
+      this._refreshLive();
+    }));
     root.querySelectorAll(".na-floor-row").forEach(row => {
       row.addEventListener("dragstart", ev => { dragId = row.dataset.node; ev.dataTransfer?.setData("text/plain", dragId); });
       row.addEventListener("dragover", ev => { ev.preventDefault(); row.style.outline = "1px dashed #42d3ea"; });
@@ -3392,10 +3556,10 @@ class NetarchApp extends Application {
       }).render(true);
     }));
     root.querySelector("#na-add-actor")?.addEventListener("click", () => this._addActor());
-    root.querySelectorAll(".na-remove-actor").forEach(btn => btn.addEventListener("click", async () => {
-      await clearActorPresence(this._netarchId, btn.dataset.actor);
+    root.querySelectorAll(".na-remove-runner").forEach(btn => btn.addEventListener("click", async () => {
+      await removeRunnerSeat(btn.dataset.seat);
       this._reRender();
-    }));
+    }));;
     root.querySelectorAll(".na-floor").forEach(btn => btn.addEventListener("click", () => {
       const node = loadNetarchs()[this._netarchId]?.nodes.find(n => n.id === btn.dataset.node);
       if (!node) return;
@@ -3422,6 +3586,7 @@ class NetarchApp extends Application {
     });
     root.querySelector("#na-roll-speed")?.addEventListener("click", () => this._rollSpeed());
     root.querySelector("#na-roll-def")?.addEventListener("click", () => this._rollDefense());
+    root.querySelector("#na-reset-ice")?.addEventListener("click", () => this._resetIceLocations());
     root.querySelectorAll(".na-iface").forEach(btn => btn.addEventListener("click", () => this._rollInterface(btn.dataset.ability)));
     root.querySelectorAll(".na-toggle-rez").forEach(btn => btn.addEventListener("click", () => this._toggleRez(btn.dataset.pid)));
     root.querySelectorAll(".na-prog-atk").forEach(btn => btn.addEventListener("click", () => this._programAttack(btn.dataset.pid)));
@@ -3465,21 +3630,32 @@ class NetarchApp extends Application {
   _addActor() {
     const netarch = loadNetarchs()[this._netarchId];
     if (!netarch?.entryNodeId) { ui.notifications.warn("Set an entry first."); return; }
-    const sceneActors = new Map();
-    for (const token of canvas.tokens?.placeables || []) {
-      if (token.actor && hasInterface(token.actor)) sceneActors.set(token.actor.id, token.actor);
-    }
-    const options = [...sceneActors.values()].map(a => `<option value="${a.id}">${a.name}</option>`).join("");
-    if (!options) { ui.notifications.warn("No scene actors with Interface."); return; }
+    const tokens = (canvas.tokens?.placeables || []).filter(t => t.actor && hasInterface(t.actor));
+    if (!tokens.length) { ui.notifications.warn("No scene tokens with Interface."); return; }
+    const options = tokens.map(t => `<option value="${t.document.uuid}">${t.name} [${t.id}]</option>`).join("");
     new Dialog({
-      title: "Add actor",
-      content: `<p>This actor stays in the netarch until you remove them.</p><select id="na-extra-actor" style="width:100%">${options}</select>`,
-      buttons: { add: { label: "Add", callback: async html => {
-        const actorId = html.find("#na-extra-actor").val();
-        const actor = game.actors.get(actorId);
-        if (!hasInterface(actor)) { ui.notifications.warn((actor?.name || "That actor") + " has no Interface ability."); return; }
-        const floor = this._selectedNode || netarch.entryNodeId;
-        await setActorPresence(netarch.id, actorId, { currentNodeId: floor, visitedNodeIds: [floor], userId: game.user.id });
+      title: "Add Runner",
+      content: `<p>Adds the selected token as its own runner (unique even if names match).</p><select id="na-extra-token" style="width:100%">${options}</select>`,
+      buttons: { add: { label: "Add Runner", callback: async html => {
+        const uuid = html.find("#na-extra-token").val();
+        const doc = await fromUuid(uuid);
+        if (!doc?.actor || !hasInterface(doc.actor)) { ui.notifications.warn("That token has no Interface ability."); return; }
+        const key = actorPresenceKey(netarch.id, doc.uuid);
+        const positions = foundry.utils.deepClone(loadPositions());
+        if (positions[key]?.currentNodeId) { ui.notifications.warn("That token is already a runner."); return; }
+        const floor = netarch.nodes.some(n => n.id === this._selectedNode) ? this._selectedNode : netarch.entryNodeId;
+        positions[key] = {
+          actorId: doc.actor.id,
+          actorUuid: doc.actor.uuid,
+          tokenUuid: doc.uuid,
+          entityId: doc.uuid,
+          userId: game.user.id,
+          currentNodeId: floor,
+          visitedNodeIds: [floor],
+          companions: [],
+          actionsUsed: 0
+        };
+        await savePositions(positions);
         this._reRender();
       } } }
     }).render(true);
@@ -3514,6 +3690,19 @@ class NetarchApp extends Application {
   }
   async close(options) {
     await this._saveView();
+    clearTimeout(this._tileTimer);
+    this._tileTimer = null;
+    const videos = new Set([
+      ...Object.values(this._tileClips || {}),
+      ...(this._canvas?.parentElement?.querySelectorAll("video") || [])
+    ]);
+    for (const video of videos) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    }
+    this._tileClips = {};
+    this._tileSlots = [];
     if (this._keyBound) window.removeEventListener("keydown", this._keyBound, true);
     this._keyBound = null;
     clearFoundryHover(this._hoverToken);
@@ -3599,6 +3788,7 @@ class NetarchApp extends Application {
       this._netarchId = btn.dataset.id; this._mode = "map"; this._editMode = false; this._selectedNode = null; this._fitOnce = false; this._reRender();
     }));
     root.querySelectorAll(".na-rename-arch").forEach(btn => btn.addEventListener("click", () => this._renameArch(btn.dataset.id)));
+    root.querySelector("#na-rename-floor")?.addEventListener("click", () => this._renameFloor());
     root.querySelectorAll(".na-delete-arch").forEach(btn => btn.addEventListener("click", async () => {
       if (!confirm("Delete this netarch?")) return;
       const netarchs = loadNetarchs();
@@ -3680,16 +3870,6 @@ class NetarchApp extends Application {
     root.querySelector("#na-sheet-back")?.addEventListener("click", () => { this._mode = this._sheetFrom === "map" ? "map" : "list"; this._reRender(); });
     root.querySelector("#na-rules")?.addEventListener("click", () => { this._panelTab = "rules"; this._reRender(); });
     root.querySelector("#na-toggle-edit")?.addEventListener("click", () => { this._editMode = !this._editMode; this._connecting = null; this._deleteMode = false; this.render(true); });
-    root.querySelectorAll(".na-pass-lock").forEach(btn => btn.addEventListener("click", async () => {
-      const all = loadNetarchs();
-      const node = all[this._netarchId]?.nodes?.find(n => n.id === (btn.dataset.node || this._selectedNode));
-      if (!node) return;
-      node.unlocked = node.unlocked !== true;
-      await saveNetarchs(all);
-      ui.notifications.info((node.name || "Password") + (node.unlocked ? " unlocked." : " locked."));
-      this._drawMap?.();
-      this._refreshLive();
-    }));
     root.querySelector("#na-save-dv")?.addEventListener("click", async () => {
       const all = loadNetarchs();
       const node = all[this._netarchId]?.nodes?.find(n => n.id === this._selectedNode);
@@ -3922,6 +4102,7 @@ document.body.addEventListener("click", game._netarchArmorClick, true);
 async function bootNetarch() {
   await ensureSettings();
   try { game.bfNetarchPos = game.settings.get("world", POSITION_KEY) || game.bfNetarchPos || {}; } catch (err) {}
+  if (!game._netarchOpenId) { try { game._netarchOpenId = game.settings.get("world", OPEN_KEY) || ""; } catch (err) {} }
   await pullSeatsFromUsers();
   await loadIcePack();
 if (game._netarchMapperHandler) game.socket.off(SOCKET_EVENT, game._netarchMapperHandler);
@@ -3995,6 +4176,16 @@ game.netarchOpen = async function(netarchId) {
   startLiveSync();
   game.netarch = game.netarch || {};
   game.netarch.open = game.netarchOpen;
+  game.netarch.currentId = currentOpenArchId;
+  game.netarch.openCurrent = async function() {
+    let id = currentOpenArchId();
+    if (!id || !loadNetarchs()[id]) {
+      const target = [...(game.user?.targets || [])].find(t => t.document?.getFlag?.("world", "netarchAccess")?.netarchId);
+      id = target?.document.getFlag("world", "netarchAccess").netarchId || "";
+    }
+    if (!id || !loadNetarchs()[id]) { ui.notifications.warn("No architecture is open right now."); return null; }
+    return game.netarchOpen(id);
+  };
   const pending = game.netarchPendingJack;
   if (pending?.id) {
     game.netarchPendingJack = null;
