@@ -120,9 +120,8 @@ async function jackInto(netarchId, mode, link) {
   try { await game.user.setFlag("world", "netarchSeat", { id: arch.id, key, seat, at: Date.now() }); } catch (err) { console.warn("Netarch seat flag", err); }
   if (actor) { try { await actor.setFlag("world", "netarchJackLink", link || "physical"); } catch (err) {} }
   if (game.user?.isGM) {
-    const app = Object.values(ui.windows).find(w => w.id === "netarch-mapper");
-    if (app?.populateArchIce) await app.populateArchIce(arch);
-  } else emitBoth("netarch-populate-ice", { id: arch.id });
+    if (typeof game.netarch?.populateIce === "function") await game.netarch.populateIce(arch, canvas.scene?.id);
+  } else emitBoth("netarch-populate-ice", { id: arch.id, sceneId: canvas.scene?.id });
   game.netarchPendingJack = { id: arch.id, actionsUsed: cost, jackMode: mode || "normal", jackLink: link || "physical", actorId: actor?.id || null };
   if (typeof game.netarchOpen === "function") await game.netarchOpen(arch.id);
   else {

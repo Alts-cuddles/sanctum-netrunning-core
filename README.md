@@ -78,6 +78,10 @@ if (game.netarch && typeof game.netarch.openCurrent === "function") {
 
 ## Changelog
 
+### 1.0.4
+- ICE tokens are created on the scene the player is viewing, even if the GM is looking at a different scene. Pressing T no longer depends on the GM sharing the player's scene.
+- If the token is not on the player's scene yet, the mapper asks the GM client to place it there and retries targeting. Ownership is unchanged. The GM still applies damage through CPR.
+
 ### 1.0.3
 - Pressing T in the mapper now sets a real Foundry target on the scene token for that Black ICE or runner, so CPR damage cards can list it and the GM can apply damage with the native per-target button.
 - The red target box only appears when Foundry actually has that token targeted. If the token is missing, you get a warning instead of a fake highlight.
