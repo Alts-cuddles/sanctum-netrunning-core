@@ -75,3 +75,10 @@ if (game.netarch && typeof game.netarch.openCurrent === "function") {
 - Jack In sits under Speed, with a line between them like Zap and Defense.
 - It uses the selected access point, then the open mapper arch, then the nearest.
 - Click it, pick Physical or Virtual, then Normal or Stealth, and the mapper opens already jacked into that architecture.
+
+## Changelog
+
+### 1.0.3
+- Pressing T in the mapper now sets a real Foundry target on the scene token for that Black ICE or runner, so CPR damage cards can list it and the GM can apply damage with the native per-target button.
+- The red target box only appears when Foundry actually has that token targeted. If the token is missing, you get a warning instead of a fake highlight.
+- ICE tokens on revealed or visited floors are visible on the scene so players can target them. Ownership is unchanged. The GM still applies damage through CPR.

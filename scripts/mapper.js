@@ -285,35 +285,60 @@ function clearFoundryHover(token) {
   try { obj._onHoverOut(new Event("mouseleave")); } catch (err) {}
   if (canvas.tokens.hover === obj) canvas.tokens.hover = null;
 }
-function foundryTargetHovered(shift) {
-  const token = tokenPlaceable(canvas.tokens?.hover);
+function foundryTargetHovered(shift, explicit) {
+  const token = tokenPlaceable(explicit || canvas.tokens?.hover);
   if (!token) return false;
   const next = !token.isTargeted;
   const releaseOthers = !shift;
-  const action = game.keybindings?.actions?.get("core.target");
-  if (typeof action?.onDown === "function") {
-    try {
-      const handled = action.onDown({ key: "KeyT", isShift: !!shift, isCtrl: false, isAlt: false, isMeta: false, repeat: false });
-      if (handled !== false && game.user?.targets?.has(token) === next) return true;
-    } catch (err) { console.warn("Netarch core.target", err); }
-  }
   try {
     if (typeof token.setTarget === "function") {
       const result = token.setTarget(next, { releaseOthers });
       if (result?.then) result.catch(err => console.warn("Netarch setTarget", err));
-      return true;
     }
   } catch (err) { console.warn("Netarch setTarget", err); }
+  if (game.user?.targets?.has(token) === next) return true;
   try {
     if (typeof canvas.tokens?.setTargets === "function") {
       const ids = new Set(releaseOthers ? [] : Array.from(game.user?.targets || []).map(t => t.id));
       if (next) ids.add(token.id);
       else ids.delete(token.id);
       canvas.tokens.setTargets([...ids]);
-      return true;
     }
   } catch (err) { console.warn("Netarch setTargets", err); }
-  return false;
+  return game.user?.targets?.has(token) === next;
+}
+function iceFloorKnown(netarch, node) {
+  if (!netarch || !node) return false;
+  if (node.revealed) return true;
+  return Object.values(getAllPositions(netarch.id) || {}).some(seat =>
+    seat?.currentNodeId === node.id || (seat?.visitedNodeIds || []).includes(node.id)
+  );
+}
+function iceSceneToken(netarch, node, index) {
+  const ice = node?.blackIce?.[index];
+  if (!ice) return null;
+  if (ice.tokenId) {
+    const byId = canvas.tokens?.get(ice.tokenId);
+    if (byId) return byId;
+  }
+  if (ice.uid) {
+    const byUid = tokenForIceUid(ice.uid);
+    if (byUid) return byUid;
+  }
+  return tokenForIceInstance(ice.name, index);
+}
+async function syncIceTokenVisibility(netarch) {
+  if (!game.user?.isGM || !netarch || !canvas.scene) return;
+  const view = canvasView();
+  for (const node of netarch.nodes || []) {
+    const hide = !iceFloorKnown(netarch, node);
+    for (let index = 0; index < (node.blackIce || []).length; index++) {
+      const doc = iceSceneToken(netarch, node, index)?.document;
+      if (!doc || doc.hidden === hide) continue;
+      try { await doc.update({ hidden: hide }); } catch (err) { console.warn("Netarch token vis", err); }
+    }
+  }
+  restoreCanvasView(view);
 }
 function canvasView() {
   if (!canvas?.ready || !canvas.stage) return null;
@@ -443,7 +468,7 @@ async function populateArchIce(netarch) {
       const token = await ensureSceneToken(actor, ice.name, index, uid);
       if (!token) continue;
       const span = Math.max(1, token.document.width || 1) * size;
-      try { await token.document.update({ x, y: originY, hidden: true }); } catch (err) { console.warn("Netarch corner", err); }
+      try { await token.document.update({ x, y: originY, hidden: !iceFloorKnown(netarch, node) }); } catch (err) { console.warn("Netarch corner", err); }
       ice.tokenId = token.id;
       x += span;
     }
@@ -1087,6 +1112,7 @@ async function setVisibility(netarchId, userId, data) {
   if (userId === game.user.id) {
     try { await game.user.setFlag("world", "netarchSeat", { id: netarchId, key, seat, at: Date.now() }); } catch (err) {}
   }
+  if (game.user?.isGM) await syncIceTokenVisibility(loadNetarchs()[netarchId]);
 }
 function getAllPositions(netarchId) {
   const result = {};
@@ -2418,7 +2444,7 @@ class NetarchApp extends Application {
     ctx.textBaseline = "top";
     ctx.fillText(actor?.name || "Runner", x, iy + size + 3);
     const sceneToken = tokenForActor(actor);
-    const targeted = this._mapperTarget?.key === ("runner:" + (seatKey || user.id)) || (sceneToken && game.user?.targets?.has(sceneToken));
+    const targeted = !!(sceneToken && game.user?.targets?.has(sceneToken));
     if (targeted) {
       ctx.strokeStyle = "#ff3b3b";
       ctx.lineWidth = 3;
@@ -2581,8 +2607,7 @@ class NetarchApp extends Application {
     ctx.textBaseline = "top";
     ctx.fillText(dead && !isGM() && !friendly ? "Derezzed" : (ice.name || "").slice(0, 12), ix + size / 2, iy + size + 2);
     if (max > 0 && showArchHp(this)) this._paintHpBar(ctx, ix, iy, size, cur, max);
-    const iceKey = "ice:" + (node?.id || "") + ":" + i;
-    if (this._mapperTarget?.key === iceKey || (token && game.user?.targets?.has(token))) {
+    if (token && game.user?.targets?.has(token)) {
       ctx.strokeStyle = "#ff3b3b";
       ctx.lineWidth = 3;
       ctx.strokeRect(ix - 4, iy - 4, size + 8, size + 8);
@@ -2714,15 +2739,24 @@ class NetarchApp extends Application {
   async _targetHovered(shift) {
     const hit = this._hoverHit;
     if (!hit) return;
-    this._setMapperTarget(hit);
     let token = this._hoverToken;
     if (!token && hit.kind === "ice") token = this._sceneTokenForIce(hit.node, hit.index);
     if (!token && hit.kind === "runner") token = tokenForActor(game.actors.get(hit.actorId)) || canvas.tokens?.placeables?.find(t => t.actor?.id === hit.actorId);
-    if (!token) return;
+    token = tokenPlaceable(token);
+    if (!token) {
+      const kind = hit.kind === "ice" ? "Black ICE" : "runner";
+      ui.notifications.warn("No scene token for that " + kind + ". The GM needs this architecture populated on the current scene.");
+      this._drawMap?.();
+      return;
+    }
     const view = canvasView();
     this._hoverToken = aimFoundryHover(token);
-    foundryTargetHovered(shift);
+    const ok = foundryTargetHovered(shift, token);
     restoreCanvasView(view);
+    if (!ok) {
+      ui.notifications.warn("Could not target " + (token.name || "that token") + " in Foundry. Hidden tokens cannot be targeted; the token must be visible on the scene (revealed or visited floors).");
+    }
+    this._drawMap?.();
   }
   _canvasPos(e) {
     const rect = this._canvas.getBoundingClientRect();
@@ -3134,6 +3168,7 @@ class NetarchApp extends Application {
     node.linkArchId = document.getElementById("ne-link-arch")?.value || node.linkArchId || null;
     netarchs[this._netarchId].budget = computeBudget(netarchs[this._netarchId]);
     await saveNetarchs(netarchs);
+    await syncIceTokenVisibility(netarchs[this._netarchId]);
     this._reRender();
   }
   async _addPicked(kind) {
@@ -3179,13 +3214,16 @@ class NetarchApp extends Application {
     node.revealed = !node.revealed;
     await saveNetarchs(netarchs);
     if (!node.revealed) await this._stripVisited([nodeId]);
+    await syncIceTokenVisibility(netarchs[this._netarchId]);
     this._drawMap();
     this._refreshLive();
   }
   async _revealAll() {
     const netarchs = loadNetarchs();
     netarchs[this._netarchId]?.nodes.forEach(n => { n.revealed = true; });
-    await saveNetarchs(netarchs); this._reRender();
+    await saveNetarchs(netarchs);
+    await syncIceTokenVisibility(netarchs[this._netarchId]);
+    this._reRender();
   }
   async _hideAll() {
     const netarchs = loadNetarchs();
@@ -3194,6 +3232,7 @@ class NetarchApp extends Application {
     arch.nodes.forEach(n => { n.revealed = false; });
     await saveNetarchs(netarchs);
     await this._stripVisited(arch.nodes.map(n => n.id));
+    await syncIceTokenVisibility(arch);
     this._reRender();
   }
 
@@ -4115,6 +4154,7 @@ game._netarchMapperHandler = async payload => {
       game.bfNetarchs = data || {};
       await game.settings.set("world", SETTING_KEY, game.bfNetarchs);
       emitNetarch("netarch-broadcast", game.bfNetarchs);
+      for (const arch of Object.values(game.bfNetarchs || {})) await syncIceTokenVisibility(arch);
       return;
     }
     if (type === "netarch-open") { game._netarchOpenId = data || ""; return; }
@@ -4123,6 +4163,7 @@ game._netarchMapperHandler = async payload => {
       game.bfNetarchPos = data || {};
       await game.settings.set("world", POSITION_KEY, game.bfNetarchPos);
       emitNetarch("netarch-positions-broadcast", game.bfNetarchPos);
+      for (const arch of Object.values(loadNetarchs() || {})) await syncIceTokenVisibility(arch);
       return;
     }
     if (type === "netarch-positions-broadcast") { game.bfNetarchPos = data || {}; refreshOpenMapper({ full: true }); return; }
@@ -4133,6 +4174,8 @@ game._netarchMapperHandler = async payload => {
         game.bfNetarchPos = all;
         await game.settings.set("world", POSITION_KEY, all);
         emitNetarch("netarch-positions-broadcast", all);
+        const archId = data.id || String(data.key || "").split("::")[0];
+        await syncIceTokenVisibility(loadNetarchs()[archId]);
       } else {
         game.bfNetarchPos = all;
         refreshOpenMapper({ full: true });
