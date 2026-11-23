@@ -78,6 +78,10 @@ if (game.netarch && typeof game.netarch.openCurrent === "function") {
 
 ## Changelog
 
+### 1.0.5
+- Targeting again follows Sanctum Netrunning 1.4.9: pressing T marks the ICE in the mapper and uses Foundry targeting when a scene token is already there. The 1.0.3/1.0.4 toasts, GM populate-on-T, and scene visibility sync are removed.
+- If there is no token on the player's current scene, T still records the world Black ICE actor and CPR's normal damage card lists that target, so the GM can apply damage with the per-target button. No GM client is required to place tokens. Ownership is unchanged.
+
 ### 1.0.4
 - ICE tokens are created on the scene the player is viewing, even if the GM is looking at a different scene. Pressing T no longer depends on the GM sharing the player's scene.
 - If the token is not on the player's scene yet, the mapper asks the GM client to place it there and retries targeting. Ownership is unchanged. The GM still applies damage through CPR.
